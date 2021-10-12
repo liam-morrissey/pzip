@@ -24,40 +24,35 @@ struct arguments {
 void* localThread(void *);
 
 void* localThread(void *argument){
-	struct arguments args = *(struct arguments*)(argument); 
-	int sector_start= args.input_chars_size/args.n_threads*args.thread_num;
+	register int i=0;
+	struct arguments *args = (struct arguments*)(argument); 
+	int sector_start= args->input_chars_size/args->n_threads*args->thread_num;
 	int sector_end;
-	if(args.n_threads-1 == args.thread_num) {
-		sector_end = args.input_chars_size;
+	int local_char_freq [26];
+	if(args->n_threads-1 == args->thread_num) {
+		sector_end = args->input_chars_size;
 	}
 	else {
-		sector_end = args.input_chars_size/args.n_threads +sector_start;
+		sector_end = args->input_chars_size/args->n_threads +sector_start;
 	}
 	//obviously inefficient, but then no reallocs required
-	if(0 != pthread_mutex_lock(args.lock1)){
+	if(pthread_mutex_lock(args->lock1)){
 		perror("pthread_mutex_lock");
 		exit(EXIT_FAILURE);
 	}
 	struct zipped_char *local_result = malloc(sizeof(struct zipped_char) * (sector_end-sector_start));
-	if(0 != pthread_mutex_unlock(args.lock1)){
+	if(pthread_mutex_unlock(args->lock1)){
 		perror("pthread_mutex_lock");
 		exit(EXIT_FAILURE);
 	}
 	int local_count = 0;
-	char prior_char = args.input_chars[sector_start];
+	char prior_char = args->input_chars[sector_start];
 	int char_count = 1;
-	//LOCK
-	if(0 != pthread_mutex_lock(args.lock2)){
-		perror("pthread_mutex_lock");
-		exit(EXIT_FAILURE);
-	}
-	args.char_frequency[args.input_chars[sector_start]-97]++;
-	if(0 != pthread_mutex_unlock(args.lock2)) {
-		perror("pthread_mutex_unlock");
-		exit(EXIT_FAILURE);
-	}
-	for(int i = sector_start+1; i< sector_end; i++){
-		if(args.input_chars[i] == prior_char){
+	
+	local_char_freq[args->input_chars[sector_start]-97]++;
+	
+	for(i = sector_start+1; i< sector_end; i++){
+		if(args->input_chars[i] == prior_char){
 			char_count++;
 		}
 		else{
@@ -68,18 +63,10 @@ void* localThread(void *argument){
 			local_result[local_count] = curr_zip;
 			local_count++;
 			char_count = 1;
-			prior_char = args.input_chars[i];
+			prior_char = args->input_chars[i];
 		}
-		//LOCK
-		if(0 != pthread_mutex_lock(args.lock2)){
-		perror("pthread_mutex_lock");
-		exit(EXIT_FAILURE);
-		}
-		args.char_frequency[args.input_chars[sector_start]-97]++;
-		if(0 != pthread_mutex_unlock(args.lock2)) {
-			perror("pthread_mutex_unlock");
-			exit(EXIT_FAILURE);
-		}
+		local_char_freq[args->input_chars[sector_start]-97]++;
+
 	}
 	if(char_count!=1){
 		struct zipped_char curr_zip;
@@ -89,26 +76,37 @@ void* localThread(void *argument){
 		local_result[local_count] = curr_zip;
 		local_count++;
 	}
-	args.local_zip_size[args.thread_num] = local_count;
+	if(pthread_mutex_lock(args->lock2)){
+		perror("pthread_mutex_lock");
+		exit(EXIT_FAILURE);
+	}
+	for(int i =0; i<26; i++){
+		args->char_frequency[i] = local_char_freq[i];
+	}
+	if(pthread_mutex_unlock(args->lock2)) {
+		perror("pthread_mutex_unlock");
+		exit(EXIT_FAILURE);
+	}
+	args->local_zip_size[args->thread_num] = local_count;
 
 	//SYNCH THREADS
-	int ret = pthread_barrier_wait(args.barrier);
+	int ret = pthread_barrier_wait(args->barrier);
 	if(0 != ret && ret != PTHREAD_BARRIER_SERIAL_THREAD) {
 		perror("pthread_barrier_wait");
 		exit(EXIT_FAILURE);
 	}
 	int start_point=0;
 	//find where it should start writing to zip array
-	for(int i=0; i<args.thread_num; i++){
-		start_point += args.local_zip_size[i];
+	for(int i=0; i<args->thread_num; i++){
+		start_point += args->local_zip_size[i];
 	}
 	//post total zipcount to zipped_chars_count
-	if(args.thread_num == args.n_threads-1)
-		*args.zipped_chars_count = start_point+local_count;
+	if(args->thread_num == args->n_threads-1)
+		*(args->zipped_chars_count) = start_point+local_count;
 	//write to global array locations
-	for(int i=0; i<local_count; i++) {
+	for(i=0; i<local_count; i++) {
 		int zip_char_loc = i+start_point;
-		args.zipped_chars[zip_char_loc] = local_result[i];
+		args->zipped_chars[zip_char_loc] = local_result[i];
 	}
 	free(local_result);
 	return (void *)0;
@@ -134,6 +132,7 @@ void pzip(int n_threads, char *input_chars, int input_chars_size,
 	  struct zipped_char *zipped_chars, int *zipped_chars_count,
 	  int *char_frequency)
 {
+	register int i=0;
 	//establish barrier
 	pthread_barrier_t barrier;
 	if (0 != pthread_barrier_init(&barrier, NULL, n_threads)) {
@@ -158,8 +157,8 @@ void pzip(int n_threads, char *input_chars, int input_chars_size,
 
 	int *local_zip_size = malloc(sizeof(int)*n_threads);
 	struct arguments *args = malloc(sizeof(struct arguments) *n_threads);
-	for( int i=0; i<n_threads; i++) {
-		struct arguments *curr_arg = args+i;
+	struct arguments *curr_arg = args;
+	for( i=0; i<n_threads; i++) {
 		curr_arg->n_threads = n_threads;
 		curr_arg->input_chars = input_chars;
 		curr_arg->input_chars_size = input_chars_size;
@@ -171,15 +170,14 @@ void pzip(int n_threads, char *input_chars, int input_chars_size,
 		curr_arg->local_zip_size = local_zip_size;
 		curr_arg->lock1 = &lock1;
 		curr_arg->lock2 = &lock2;
-		//
-		
-		if(0 != pthread_create(thread_id+i, NULL, localThread, (void *)(curr_arg))) {
+		if(0 != pthread_create(thread_id+i, NULL, &localThread, (void *)(curr_arg))) {
 			perror("pthread_create");
 			exit(EXIT_FAILURE);
 		}
+		curr_arg++;
 	}
 	//Block until all threads have completed runtime
-	for(int i=0; i<n_threads; i++){
+	for(i=0; i<n_threads; i++){
 		void *ret;
 		if (0 != pthread_join(thread_id[i],&ret)) {
 			perror("pthread_join");
@@ -189,23 +187,6 @@ void pzip(int n_threads, char *input_chars, int input_chars_size,
 			fprintf(stderr,"Error in thread %lu",(unsigned long)thread_id[i]);
 			exit(EXIT_FAILURE);
 		}
-	}
-	if(0 != pthread_mutex_destroy(&lock1)) {
-		perror("pthread_mutex_destroy");
-		exit(EXIT_FAILURE);
-	}
-
-	if(0 != pthread_mutex_destroy(&lock2)) {
-		perror("pthread_mutex_destroy");
-		exit(EXIT_FAILURE);
-	}
-
-	if(0 != pthread_barrier_destroy(&barrier)) {
-		perror("pthread_barrier_destroy");
-		exit(EXIT_FAILURE);
-	}
-	for(int i=0;i<*zipped_chars_count;i++){
-		printf("[%c,%d] ",zipped_chars[i].character,zipped_chars[i].occurence);
 	}
 
 	free(thread_id);
